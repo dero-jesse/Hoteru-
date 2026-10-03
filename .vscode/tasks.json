@@ -1,0 +1,33 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Hotel system: run services",
+			"type": "shell",
+			"command": "docker compose up --build",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Hotel reception: run Vite",
+			"type": "shell",
+			"command": "npm --prefix frontend run dev -- --host 0.0.0.0",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Hotel API: run FastAPI",
+			"type": "shell",
+			"command": "cd backend && /usr/bin/python3 -m uvicorn app:app --host 0.0.0.0 --port 8000",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Hotel reception: production build",
+			"type": "shell",
+			"command": "npm --prefix frontend run build",
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}

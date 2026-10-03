@@ -1,0 +1,75 @@
+openapi: 3.1.0
+info:
+  title: Hotel Management System API
+  version: 1.0.0
+  description: Staff-only backend API for hotel operations, finance, rooms, outlets, procurement, HR and asset management.
+servers:
+  - url: http://localhost:8000
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: Service is healthy
+  /auth/login:
+    post:
+      summary: Staff login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '200':
+          description: JWT issued
+  /reservations:
+    post:
+      summary: Create reservation
+      responses:
+        '201':
+          description: Reservation created
+  /front-desk/checkin:
+    post:
+      summary: Check in a guest
+      responses:
+        '200':
+          description: Guest checked in
+  /front-desk/checkout:
+    post:
+      summary: Check out a guest and settle folio
+      responses:
+        '200':
+          description: Guest checked out
+  /ledger/posting-engine:
+    post:
+      summary: Post a journal event
+      responses:
+        '200':
+          description: Posting recorded
+  /procurement/po/approve:
+    post:
+      summary: Approve purchase order
+      responses:
+        '200':
+          description: PO approved
+  /reports/trial-balance:
+    get:
+      summary: Trial balance report
+      responses:
+        '200':
+          description: Trial balance
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+security:
+  - bearerAuth: []

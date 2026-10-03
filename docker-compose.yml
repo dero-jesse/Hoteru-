@@ -1,0 +1,54 @@
+version: '3.9'
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: hotel_db
+      POSTGRES_USER: hotel
+      POSTGRES_PASSWORD: hotelpass
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+
+  api:
+    build:
+      context: ./backend
+    depends_on:
+      - postgres
+      - redis
+      - rabbitmq
+    environment:
+      DATABASE_URL: postgresql+psycopg://hotel:hotelpass@postgres:5432/hotel_db
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      JWT_SECRET: dev-secret-change-me
+      JWT_ALGORITHM: HS256
+      APP_ENV: development
+    ports:
+      - '8000:8000'
+    command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: http://localhost:8000
+    depends_on:
+      - api
+    ports:
+      - '5173:80'
+
+volumes:
+  postgres_data:
