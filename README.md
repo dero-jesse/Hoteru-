@@ -57,7 +57,7 @@ A staff-only hotel management system with a FastAPI backend and a separate React
 
    The Vite URL is normally http://localhost:5173.
 
-The dashboard's overview cards and sample guest cards are clearly marked preview data. Reservation and front-desk forms call the configured API URL. Set `VITE_API_BASE_URL` in `frontend/.env` if the backend is hosted somewhere other than `http://localhost:8000`.
+The reception frontend provides a responsive front-desk dashboard, guest check-in, checkout for guests checked in during the current session, and reservation creation. Check-in and reservation forms call the configured API URL. Since the API does not yet expose read endpoints for visitors, appointments, or dashboard metrics, those displayed records are preview data; new check-ins and reservation confirmations reflect successful API responses. Set `VITE_API_BASE_URL` in `frontend/.env` if the backend is hosted somewhere other than `http://localhost:8000`.
 
 ## Default credentials
 
