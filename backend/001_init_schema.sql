@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     name VARCHAR(160) NOT NULL,
     account_type VARCHAR(32) NOT NULL,
     parent_code VARCHAR(64),
-    currency CHAR(3) NOT NULL DEFAULT 'KES',
+    currency CHAR(3) NOT NULL DEFAULT 'UGX',
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS journal_entries (
     source_module VARCHAR(64) NOT NULL,
     source_event VARCHAR(128) NOT NULL,
     idempotency_key VARCHAR(128) NOT NULL UNIQUE,
-    currency CHAR(3) NOT NULL DEFAULT 'KES',
+    currency CHAR(3) NOT NULL DEFAULT 'UGX',
     memo TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_by VARCHAR(128) NOT NULL,

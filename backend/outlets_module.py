@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from config import settings
 from events import DomainEvent, event_bus
 from finance_module import Ledger
 
@@ -23,7 +24,7 @@ class OutletService:
         self.ledger = ledger
 
     def record_sale(self, outlet: str, total_minor: int, cost_minor: int, room_code: Optional[str] = None, paid_directly: bool = False) -> OutletSale:
-        vat_minor = int(round(total_minor * 0.16))
+        vat_minor = int(round(total_minor * settings.vat_rate / (1 + settings.vat_rate)))
         sale = OutletSale(outlet=outlet, room_code=room_code, total_minor=total_minor, vat_minor=vat_minor, cost_minor=cost_minor, paid_directly=paid_directly)
         if room_code:
             self.ledger.post_event(
@@ -33,8 +34,8 @@ class OutletService:
                     "aggregate_id": f"{outlet}:{room_code}",
                     "source_module": "outlets",
                     "amount_minor": total_minor,
-                    "vat_rate": 0.16,
-                    "currency": "KES",
+                    "vat_rate": settings.vat_rate,
+                    "currency": settings.currency,
                     "created_by": "cashier",
                     "memo": f"Outlet sale charged to room {room_code}",
                 },
@@ -46,7 +47,7 @@ class OutletService:
                     "aggregate_id": f"{outlet}:{room_code}",
                     "source_module": "inventory",
                     "amount_minor": cost_minor,
-                    "currency": "KES",
+                    "currency": settings.currency,
                     "created_by": "cashier",
                     "memo": f"Cogs for {outlet}",
                 },
@@ -59,8 +60,8 @@ class OutletService:
                     "aggregate_id": f"{outlet}:cash",
                     "source_module": "outlets",
                     "amount_minor": total_minor,
-                    "vat_rate": 0.16,
-                    "currency": "KES",
+                    "vat_rate": settings.vat_rate,
+                    "currency": settings.currency,
                     "created_by": "cashier",
                     "memo": f"Direct cash sale at {outlet}",
                 },

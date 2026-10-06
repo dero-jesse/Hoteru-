@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from config import settings
 from database import db
 from events import DomainEvent, event_bus
 from finance_module import JournalEntry, Ledger
@@ -73,7 +74,7 @@ class FrontDeskService:
                 "aggregate_id": guest_name,
                 "source_module": "front_desk",
                 "amount_minor": room.rate_minor,
-                "currency": "KES",
+                "currency": settings.currency,
                 "created_by": "front_desk",
                 "memo": f"Deposit for {guest_name}",
             },
@@ -91,8 +92,8 @@ class FrontDeskService:
                 "aggregate_id": guest_name,
                 "source_module": "rooms",
                 "amount_minor": amount_minor,
-                "vat_rate": 0.16,
-                "currency": "KES",
+                "vat_rate": settings.vat_rate,
+                "currency": settings.currency,
                 "created_by": "front_desk",
                 "memo": f"Room night for {guest_name}",
             },
@@ -112,7 +113,7 @@ class FrontDeskService:
                     "cash_amount_minor": cash_paid_minor,
                     "deposit_release_minor": deposit_release_minor,
                     "receivable_settlement_minor": receivable,
-                    "currency": "KES",
+                    "currency": settings.currency,
                     "created_by": "front_desk",
                     "memo": f"Checkout for {guest_name}",
                 },

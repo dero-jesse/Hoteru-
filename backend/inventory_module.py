@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+from config import settings
 from events import DomainEvent, event_bus
 from finance_module import Ledger
 
@@ -36,7 +37,7 @@ class InventoryService:
                 "aggregate_id": sku,
                 "source_module": "inventory",
                 "amount_minor": quantity * item.unit_cost_minor,
-                "currency": "KES",
+                "currency": settings.currency,
                 "created_by": "storekeeper",
                 "memo": f"Received {quantity} units of {sku}",
             },
@@ -56,7 +57,7 @@ class InventoryService:
                 "aggregate_id": sku,
                 "source_module": "inventory",
                 "amount_minor": quantity * item.unit_cost_minor,
-                "currency": "KES",
+                "currency": settings.currency,
                 "created_by": "storekeeper",
                 "memo": f"Stock depletion for {sku}",
             },

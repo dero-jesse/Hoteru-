@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from config import settings
 from database import db
 from events import DomainEvent, event_bus
 
@@ -13,7 +14,7 @@ class Account:
     code: str
     name: str
     account_type: str
-    currency: str = "KES"
+    currency: str = settings.currency
     parent_code: Optional[str] = None
 
 
@@ -43,7 +44,7 @@ class JournalEntry:
     idempotency_key: str
     created_by: str
     memo: Optional[str]
-    currency: str = "KES"
+    currency: str = settings.currency
     lines: List[JournalLine] = field(default_factory=list)
     posted_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -154,7 +155,7 @@ class Ledger:
             idempotency_key=payload.get("idempotency_key", f"{event_type}:{payload.get('aggregate_id','')}-{amount}"),
             created_by=payload.get("created_by", "system"),
             memo=payload.get("memo"),
-            currency=payload.get("currency", "KES"),
+            currency=payload.get("currency", settings.currency),
             lines=lines,
         )
         if entry.debit_total != entry.credit_total:
@@ -196,17 +197,17 @@ class Ledger:
     def balance_sheet(self) -> Dict[str, int]:
         totals = self.trial_balance()
         assets = sum(v for k, v in totals.items() if self.accounts.get(k, Account(k, k, "asset")).account_type == "asset")
-        liabilities = sum(v for k, v in totals.items() if self.accounts.get(k, Account(k, k, "liability")).account_type == "liability")
-        equity = sum(v for k, v in totals.items() if self.accounts.get(k, Account(k, k, "equity")).account_type == "equity")
-        revenue = sum(v for k, v in totals.items() if self.accounts.get(k, Account(k, k, "revenue")).account_type == "revenue")
+        liabilities = -sum(v for k, v in totals.items() if self.accounts.get(k, Account(k, k, "liability")).account_type == "liability")
+        equity = -sum(v for k, v in totals.items() if self.accounts.get(k, Account(k, k, "equity")).account_type == "equity")
+        revenue = -sum(v for k, v in totals.items() if self.accounts.get(k, Account(k, k, "revenue")).account_type == "revenue")
         expenses = sum(v for k, v in totals.items() if self.accounts.get(k, Account(k, k, "expense")).account_type == "expense")
         return {"assets": assets, "liabilities": liabilities, "equity": equity, "revenue": revenue, "expenses": expenses}
 
     def income_statement(self) -> Dict[str, int]:
         totals = self.trial_balance()
-        revenue = sum(v for k, v in totals.items() if self.accounts.get(k, Account(k, k, "revenue")).account_type == "revenue")
+        revenue = -sum(v for k, v in totals.items() if self.accounts.get(k, Account(k, k, "revenue")).account_type == "revenue")
         expenses = sum(v for k, v in totals.items() if self.accounts.get(k, Account(k, k, "expense")).account_type == "expense")
-        return {"revenue": revenue, "expenses": expenses, "net_profit": revenue + expenses}
+        return {"revenue": revenue, "expenses": expenses, "net_profit": revenue - expenses}
 
     def close_period(self) -> Dict[str, int]:
         self.open_period = False
@@ -225,7 +226,7 @@ class NightAuditService:
                 "aggregate_id": room_code,
                 "source_module": "rooms",
                 "amount_minor": charge_minor,
-                "vat_rate": 0.16,
+                "vat_rate": settings.vat_rate,
                 "created_by": "night_audit",
                 "memo": f"Night audit room charge for {guest_name}",
             },
@@ -260,8 +261,8 @@ def build_default_ledger() -> Ledger:
     ledger.seed_accounts(accounts)
     ledger.seed_rules([
         {"event_type": "deposit_received", "debit_account_code": "1000", "credit_account_code": "2100", "vat_rate": 0},
-        {"event_type": "room_night_posted", "debit_account_code": "1100", "credit_account_code": "4000", "vat_rate": 0.16},
-        {"event_type": "outlet_sale_to_room", "debit_account_code": "1100", "credit_account_code": "4010", "vat_rate": 0.16},
+        {"event_type": "room_night_posted", "debit_account_code": "1100", "credit_account_code": "4000", "vat_rate": settings.vat_rate},
+        {"event_type": "outlet_sale_to_room", "debit_account_code": "1100", "credit_account_code": "4010", "vat_rate": settings.vat_rate},
         {"event_type": "cost_of_sales", "debit_account_code": "5000", "credit_account_code": "1200", "vat_rate": 0},
         {"event_type": "checkout_settlement", "debit_account_code": "1000", "credit_account_code": "1100", "vat_rate": 0},
         {"event_type": "grn_received", "debit_account_code": "1200", "credit_account_code": "6000", "vat_rate": 0},

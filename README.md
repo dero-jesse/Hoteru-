@@ -1,6 +1,6 @@
 # Hotel Management System
 
-A staff-only hotel management system with a FastAPI backend and a separate React + TypeScript reception frontend. The frontend focuses on hotel arrivals, in-house guests, departures, reservations and check-in, while calling the backend REST API for supported operations.
+A staff-only hotel management system with a FastAPI backend and a React + TypeScript frontend for front desk and general management. The front desk supports arrivals, guest stays, checkout and reservations. The management workspace summarizes live ledger and operational state, with connected screens for approvals, procurement, inventory, outlets, payroll, assets and night audit.
 
 ## Stack
 
@@ -57,7 +57,31 @@ A staff-only hotel management system with a FastAPI backend and a separate React
 
    The Vite URL is normally http://localhost:5173.
 
-The reception frontend provides a responsive front-desk dashboard, guest check-in, checkout for guests checked in during the current session, and reservation creation. Check-in and reservation forms call the configured API URL. Since the API does not yet expose read endpoints for visitors, appointments, or dashboard metrics, those displayed records are preview data; new check-ins and reservation confirmations reflect successful API responses. Set `VITE_API_BASE_URL` in `frontend/.env` if the backend is hosted somewhere other than `http://localhost:8000`.
+The responsive frontend has separate Front Desk and Management workspaces. Management figures are read from the running backend ledger and operational services; approval, purchasing, stock, outlet sales, payroll, asset depreciation and night-audit actions post through their corresponding API endpoints. Appointments shown in the front-desk preview are illustrative because the backend does not provide an appointment scheduling service. Set `VITE_API_BASE_URL` in `frontend/.env` if the backend is hosted somewhere other than `http://localhost:8000`.
+
+Management API endpoints are documented at `http://localhost:8000/docs`. Staff accounts/role assignments, operational service state and ledger entries are currently held in memory and reset when the API process restarts; configure persistent database storage before using this for ongoing staff access.
+
+### Uganda market defaults
+
+The default market configuration uses Uganda Shillings (UGX), `en-UG` formatting, and `Africa/Kampala` time. Monetary API fields that retain the legacy `_minor` suffix are whole UGX shillings in this configuration because UGX has no commonly used fractional unit. The backend defaults to an 18% VAT rate; backend deployments can override currency, timezone, and VAT with `APP_CURRENCY`, `APP_TIMEZONE`, and `VAT_RATE`. Confirm applicable VAT treatment and EFRIS requirements with the Uganda Revenue Authority or a qualified local accountant before production use.
+
+### Staff sign-in and role access
+
+Sign in at the reception frontend with a staff account. The signed-in role selects the available workspace and navigation; the API independently checks each bearer token and role, so hiding a screen is not the security boundary. Tokens expire after the configured JWT lifetime. Signing out removes the browser's session token.
+
+| Staff role | Frontend workspace | API access |
+| --- | --- | --- |
+| `front_desk` | Front Desk | Guest check-in/out, reservations, night audit |
+| `manager` / `admin` | Front Desk and Management | Management dashboard, approvals and operations |
+| `accountant` | Finance, Reports and permitted Resources | Ledger reports/posting, payroll, invoices, assets |
+| `procurement` | Resources | Purchase orders, receipts and invoice matching |
+| `storekeeper` | Resources | Inventory and goods receipts |
+| `outlet_cashier` | Resources | Outlet sales |
+| `housekeeping` | Sign-in only; no module is currently assigned | No operational routes are currently assigned |
+
+In development, the seeded `admin@hotel.local` account can create staff accounts from Management → People. Account creation is also available to admins at `POST /auth/staff`; new passwords must be at least 12 characters. Only admins can create accounts or assign roles. Provide each employee with an individual account rather than sharing the development admin credentials.
+
+Set a unique, strong `JWT_SECRET` for every non-development deployment. The API rejects the built-in development secret outside development; JWT signing is restricted to HS256 and tokens expire after `JWT_EXPIRES_MINUTES` (60 by default).
 
 ## Default credentials
 
@@ -97,4 +121,4 @@ The suite covers:
 
 - No guest-facing endpoints or guest accounts are exposed.
 - Every write path emits audit records including actor, timestamp, action, before/after payload.
-- All money values are stored as integer minor units and currency codes are tracked with each transaction.
+- All money values are stored as integers in the configured currency unit and currency codes are tracked with each transaction.

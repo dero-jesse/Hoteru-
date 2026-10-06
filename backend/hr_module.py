@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List
 
+from config import settings
 from finance_module import Ledger
 
 
@@ -28,7 +29,7 @@ class PayrollService:
                 "aggregate_id": period,
                 "source_module": "hr",
                 "amount_minor": total_minor,
-                "currency": "KES",
+                "currency": settings.currency,
                 "created_by": "hr",
                 "memo": f"Payroll for {period}",
             },

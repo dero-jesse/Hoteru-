@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from config import settings
 from events import DomainEvent, event_bus
 from finance_module import Ledger
 
@@ -24,6 +25,7 @@ class SupplierInvoice:
     supplier_name: str
     total_minor: int
     status: str = "awaiting_match"
+    payment_status: str = "unpaid"
 
 
 class ProcurementService:
@@ -39,7 +41,9 @@ class ProcurementService:
         return order
 
     def approve_po(self, po_number: str, requester: str, approver: str) -> PurchaseOrder:
-        order = next(item for item in self.orders if item.po_number == po_number)
+        order = next((item for item in self.orders if item.po_number == po_number), None)
+        if order is None:
+            raise ValueError(f"Purchase order {po_number} not found")
         if requester == approver:
             raise ValueError("Requester cannot approve own purchase order")
         order.status = "approved"
@@ -48,7 +52,9 @@ class ProcurementService:
         return order
 
     def receive_grn(self, po_number: str, qty_received: int, unit_cost_minor: int) -> Dict[str, Any]:
-        order = next(item for item in self.orders if item.po_number == po_number)
+        order = next((item for item in self.orders if item.po_number == po_number), None)
+        if order is None:
+            raise ValueError(f"Purchase order {po_number} not found")
         total = qty_received * unit_cost_minor
         self.ledger.post_event(
             "grn_received",
@@ -57,7 +63,7 @@ class ProcurementService:
                 "aggregate_id": po_number,
                 "source_module": "procurement",
                 "amount_minor": total,
-                "currency": "KES",
+                "currency": settings.currency,
                 "created_by": "procurement",
                 "memo": f"Goods received for {po_number}",
             },
@@ -75,7 +81,7 @@ class ProcurementService:
                 "aggregate_id": invoice_number,
                 "source_module": "procurement",
                 "amount_minor": total_minor,
-                "currency": "KES",
+                "currency": settings.currency,
                 "created_by": "accountant",
                 "memo": f"Matched invoice {invoice_number}",
             },
@@ -86,7 +92,9 @@ class ProcurementService:
     def release_payment(self, invoice_number: str, payer_role: str, payer_name: str) -> Dict[str, Any]:
         if payer_role not in {"accountant", "manager", "admin"}:
             raise ValueError("Only authorised roles can release payment")
-        invoice = next(item for item in self.invoices if item.invoice_number == invoice_number)
+        invoice = next((item for item in self.invoices if item.invoice_number == invoice_number), None)
+        if invoice is None:
+            raise ValueError(f"Invoice {invoice_number} not found")
         self.ledger.post_event(
             "supplier_payment",
             {
@@ -94,10 +102,10 @@ class ProcurementService:
                 "aggregate_id": invoice_number,
                 "source_module": "procurement",
                 "amount_minor": invoice.total_minor,
-                "currency": "KES",
+                "currency": settings.currency,
                 "created_by": payer_name,
                 "memo": f"Payment for invoice {invoice_number}",
             },
         )
-        invoice.status = "paid"
+        invoice.payment_status = "paid"
         return {"invoice_number": invoice_number, "status": "paid", "payer_role": payer_role}

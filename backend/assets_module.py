@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 
+from config import settings
 from finance_module import Ledger
 
 
@@ -27,7 +28,9 @@ class AssetService:
         return asset
 
     def run_monthly_depreciation(self, asset_code: str, amount_minor: int) -> FixedAsset:
-        asset = next(item for item in self.assets if item.asset_code == asset_code)
+        asset = next((item for item in self.assets if item.asset_code == asset_code), None)
+        if asset is None:
+            raise ValueError(f"Asset {asset_code} not found")
         asset.accumulated_depreciation_minor += amount_minor
         self.ledger.post_event(
             "depreciation_run",
@@ -36,7 +39,7 @@ class AssetService:
                 "aggregate_id": asset_code,
                 "source_module": "assets",
                 "amount_minor": amount_minor,
-                "currency": "KES",
+                "currency": settings.currency,
                 "created_by": "accountant",
                 "memo": f"Depreciation for {asset_code}",
             },
