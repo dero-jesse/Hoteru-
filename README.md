@@ -57,9 +57,11 @@ A staff-only hotel management system with a FastAPI backend and a React + TypeSc
 
    The Vite URL is normally http://localhost:5173.
 
-The responsive frontend has separate Front Desk and Management workspaces. Management figures are read from the running backend ledger and operational services; approval, purchasing, stock, outlet sales, payroll, asset depreciation and night-audit actions post through their corresponding API endpoints. Appointments shown in the front-desk preview are illustrative because the backend does not provide an appointment scheduling service. Set `VITE_API_BASE_URL` in `frontend/.env` if the backend is hosted somewhere other than `http://localhost:8000`.
+The responsive frontend has separate Front Desk, Outlet, and Management workspaces. Front Desk guest stays and reservation schedules are read from the backend API; guest folios include room-service and restaurant charges posted to a checked-in room. Restaurant sales can also be recorded for walk-in customers with cash, card, or mobile-money payments. Room-service orders require an occupied room. The outlet cashier handles outlet sales; the front desk settles the combined folio balance at checkout, applying the guest deposit and recording any remaining payment. General-purpose meetings and appointments are not currently supported. Management figures are read from the running backend ledger and operational services; approval, purchasing, stock, payroll, asset depreciation and night-audit actions post through their corresponding API endpoints. Set `VITE_API_BASE_URL` in `frontend/.env` if the backend is hosted somewhere other than `http://localhost:8000`.
 
 Management API endpoints are documented at `http://localhost:8000/docs`. Staff accounts/role assignments, operational service state and ledger entries are currently held in memory and reset when the API process restarts; configure persistent database storage before using this for ongoing staff access.
+
+In development mode, the API starts with three clearly marked sample rooms (`DEMO-101`, `DEMO-102`, and `DEMO-201`) so reservation and check-in workflows can be exercised. Their room types and rates are placeholders, not hotel inventory or pricing; all operational data, including these rooms, resets when the API restarts.
 
 ### Uganda market defaults
 
@@ -71,12 +73,12 @@ Sign in at the reception frontend with a staff account. The signed-in role selec
 
 | Staff role | Frontend workspace | API access |
 | --- | --- | --- |
-| `front_desk` | Front Desk | Guest check-in/out, reservations, night audit |
-| `manager` / `admin` | Front Desk and Management | Management dashboard, approvals and operations |
+| `front_desk` | Front Desk | Guest check-in/out, reservations, night audit, restaurant/room-service folio charges |
+| `outlet_cashier` | Outlet | Restaurant walk-in payments, room-service and guest folio sales |
+| `manager` / `admin` | Front Desk, Outlet and Management | Management dashboard, approvals, outlet sales and operations |
 | `accountant` | Finance, Reports and permitted Resources | Ledger reports/posting, payroll, invoices, assets |
 | `procurement` | Resources | Purchase orders, receipts and invoice matching |
 | `storekeeper` | Resources | Inventory and goods receipts |
-| `outlet_cashier` | Resources | Outlet sales |
 | `housekeeping` | Sign-in only; no module is currently assigned | No operational routes are currently assigned |
 
 In development, the seeded `admin@hotel.local` account can create staff accounts from Management → People. Account creation is also available to admins at `POST /auth/staff`; new passwords must be at least 12 characters. Only admins can create accounts or assign roles. Provide each employee with an individual account rather than sharing the development admin credentials.

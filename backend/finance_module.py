@@ -99,10 +99,20 @@ class Ledger:
             JournalLine(rule.debit_code, "debit", base_amount + (vat_amount if event_type in {"room_night_posted", "outlet_sale_to_room"} and rule.debit_code == "1100" else 0), f"{event_type}: debit"),
             JournalLine(rule.credit_code, "credit", amount + (vat_amount if event_type in {"room_night_posted", "outlet_sale_to_room"} and rule.credit_code == "2200" else 0), f"{event_type}: credit"),
         ]
-        if event_type in {"room_night_posted", "outlet_sale_to_room"}:
+        if event_type in {"room_night_posted", "outlet_sale_to_room", "outlet_sale_direct"}:
+            revenue_code = {
+                "restaurant": "4010",
+                "room_service": "4030",
+            }.get(str(payload.get("outlet", "")), "4000" if event_type == "room_night_posted" else "4010")
+            payment_code = {
+                "cash": "1000",
+                "card": "1010",
+                "mobile_money": "1020",
+            }.get(str(payload.get("payment_method", "cash")), "1000")
+            debit_code = payment_code if event_type == "outlet_sale_direct" else "1100"
             lines = [
-                JournalLine("1100", "debit", amount, "Guest receivable"),
-                JournalLine("4000", "credit", base_amount, "Room revenue"),
+                JournalLine(debit_code, "debit", amount, "Outlet payment" if event_type == "outlet_sale_direct" else "Guest receivable"),
+                JournalLine(revenue_code, "credit", base_amount, "Outlet revenue" if event_type != "room_night_posted" else "Room revenue"),
                 JournalLine("2200", "credit", vat_amount, "VAT payable"),
             ]
         if event_type == "deposit_received":
@@ -111,10 +121,17 @@ class Ledger:
                 JournalLine("2100", "credit", amount, "Guest deposit"),
             ]
         if event_type == "checkout_settlement":
+            cash_account_code = {
+                "cash": "1000",
+                "card": "1010",
+                "mobile_money": "1020",
+            }.get(str(payload.get("payment_method", "cash")), "1000")
             lines = [
-                JournalLine("1000", "debit", int(payload.get("cash_amount_minor", 0)), "Cash received"),
+                JournalLine(cash_account_code, "debit", int(payload.get("cash_amount_minor", 0)), "Guest payment received"),
                 JournalLine("2100", "debit", int(payload.get("deposit_release_minor", 0)), "Deposit release"),
                 JournalLine("1100", "credit", int(payload.get("receivable_settlement_minor", 0)), "Guest receivable cleared"),
+                JournalLine("2100", "debit", int(payload.get("deposit_refund_minor", 0)), "Unused deposit refunded"),
+                JournalLine(cash_account_code, "credit", int(payload.get("deposit_refund_minor", 0)), "Deposit refund paid"),
             ]
         if event_type == "grn_received":
             lines = [
@@ -265,6 +282,7 @@ def build_default_ledger() -> Ledger:
         {"event_type": "outlet_sale_to_room", "debit_account_code": "1100", "credit_account_code": "4010", "vat_rate": settings.vat_rate},
         {"event_type": "cost_of_sales", "debit_account_code": "5000", "credit_account_code": "1200", "vat_rate": 0},
         {"event_type": "checkout_settlement", "debit_account_code": "1000", "credit_account_code": "1100", "vat_rate": 0},
+        {"event_type": "outlet_sale_direct", "debit_account_code": "1000", "credit_account_code": "4000", "vat_rate": settings.vat_rate},
         {"event_type": "grn_received", "debit_account_code": "1200", "credit_account_code": "6000", "vat_rate": 0},
         {"event_type": "supplier_invoice_matched", "debit_account_code": "6000", "credit_account_code": "2000", "vat_rate": 0},
         {"event_type": "supplier_payment", "debit_account_code": "2000", "credit_account_code": "1000", "vat_rate": 0},

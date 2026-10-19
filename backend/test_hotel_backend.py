@@ -1,9 +1,10 @@
 import unittest
+from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
 from fastapi.routing import APIRoute
 
-from app import app
+from app import app, ledger
 from auth_module import StaffUser, create_staff_user, create_token_for_user
 from config import Settings, settings
 from database import db
@@ -11,7 +12,7 @@ from finance_module import build_default_ledger
 from inventory_module import InventoryService
 from outlets_module import OutletService
 from procurement_module import ProcurementService
-from rooms_module import FrontDeskService
+from rooms_module import FrontDeskService, ReservationService
 
 
 class HotelBackendTests(unittest.TestCase):
@@ -54,9 +55,16 @@ class HotelBackendTests(unittest.TestCase):
             "Procurement Test",
             "procurement",
         )
+        outlet_cashier = create_staff_user(
+            "role-outlet-cashier@example.test",
+            "outlet-cashier-password",
+            "Outlet Cashier Test",
+            "outlet_cashier",
+        )
         front_desk_token = create_token_for_user(front_desk)
         manager_token = create_token_for_user(manager)
         procurement_token = create_token_for_user(procurement_user)
+        outlet_token = create_token_for_user(outlet_cashier)
 
         with TestClient(app) as client:
             self.assertEqual(client.get("/management/overview").status_code, 401)
@@ -66,6 +74,14 @@ class HotelBackendTests(unittest.TestCase):
                     headers={"Authorization": f"Bearer {front_desk_token}"},
                 ).status_code,
                 403,
+            )
+            self.assertEqual(
+                client.post(
+                    "/rooms",
+                    json={"room_code": "ROLE-101", "room_type": "standard", "rate_minor": 15000},
+                    headers={"Authorization": f"Bearer {manager_token}"},
+                ).status_code,
+                200,
             )
             self.assertEqual(
                 client.post(
@@ -93,6 +109,20 @@ class HotelBackendTests(unittest.TestCase):
                 client.get(
                     "/procurement/purchase-orders",
                     headers={"Authorization": f"Bearer {front_desk_token}"},
+                ).status_code,
+                403,
+            )
+            self.assertEqual(
+                client.get(
+                    "/outlets/active-folios",
+                    headers={"Authorization": f"Bearer {outlet_token}"},
+                ).status_code,
+                200,
+            )
+            self.assertEqual(
+                client.get(
+                    "/reports/trial-balance",
+                    headers={"Authorization": f"Bearer {outlet_token}"},
                 ).status_code,
                 403,
             )
@@ -249,6 +279,187 @@ class HotelBackendTests(unittest.TestCase):
         settlement = frontdesk.checkout("Alice Example", "101", cash_paid_minor=5000, deposit_release_minor=10000)
         self.assertEqual(settlement["status"], "closed")
         self.assertTrue(all(entry.is_balanced() for entry in ledger.entries))
+
+    def test_reservations_prevent_overlap_and_cancellation_releases_room(self):
+        ledger = build_default_ledger()
+        frontdesk = FrontDeskService(ledger)
+        frontdesk.create_room("BOOK-101", "standard", 12000)
+        reservations = ReservationService(frontdesk)
+        check_in = date.today() + timedelta(days=3)
+        check_out = check_in + timedelta(days=2)
+
+        first = reservations.create_reservation(
+            "First Guest",
+            "BOOK-101",
+            check_in,
+            check_out,
+            12000,
+        )
+        with self.assertRaisesRegex(ValueError, "not available"):
+            reservations.create_reservation(
+                "Second Guest",
+                "BOOK-101",
+                check_in + timedelta(days=1),
+                check_out + timedelta(days=1),
+                12000,
+            )
+
+        reservations.cancel_reservation(first.reservation_id)
+        next_booking = reservations.create_reservation(
+            "Second Guest",
+            "BOOK-101",
+            check_in + timedelta(days=1),
+            check_out + timedelta(days=1),
+            12000,
+        )
+        self.assertEqual(next_booking.status, "confirmed")
+        self.assertEqual(first.status, "cancelled")
+
+    def test_reservation_requires_known_room_and_valid_date_range(self):
+        frontdesk = FrontDeskService(build_default_ledger())
+        reservations = ReservationService(frontdesk)
+        frontdesk.create_room("BOOK-102", "standard", 12000)
+        today = date.today()
+
+        with self.assertRaisesRegex(ValueError, "not registered"):
+            reservations.create_reservation("Guest", "UNKNOWN", today, today + timedelta(days=1), 12000)
+        with self.assertRaisesRegex(ValueError, "after check-in"):
+            reservations.create_reservation("Guest", "BOOK-102", today, today, 12000)
+        with self.assertRaisesRegex(ValueError, "past"):
+            reservations.create_reservation("Guest", "BOOK-102", today - timedelta(days=1), today, 12000)
+
+    def test_front_desk_api_lists_reservations_and_stay_status(self):
+        admin = db.query("staff_users", email="admin@hotel.local")[0]
+        headers = {"Authorization": f"Bearer {create_token_for_user(StaffUser(**admin))}"}
+        guest_name = "API Front Desk Guest"
+        room_code = "API-101"
+
+        with TestClient(app) as client:
+            created_room = client.post(
+                "/rooms",
+                json={"room_code": room_code, "room_type": "deluxe", "rate_minor": 15000},
+                headers=headers,
+            )
+            self.assertEqual(created_room.status_code, 200)
+            created_reservation = client.post(
+                "/reservations",
+                json={
+                    "guest_name": guest_name,
+                    "room_code": room_code,
+                    "check_in": "2026-10-19",
+                    "check_out": "2026-10-20",
+                    "rate_minor": 15000,
+                },
+                headers=headers,
+            )
+            self.assertEqual(created_reservation.status_code, 200)
+            reservation_id = created_reservation.json()["reservation"]["reservation_id"]
+            self.assertEqual(
+                client.get("/reservations", headers=headers).json()["reservations"][0]["guest_name"],
+                guest_name,
+            )
+            available_rooms = client.get(
+                "/rooms/availability",
+                params={"check_in": "2026-10-19", "check_out": "2026-10-20"},
+                headers=headers,
+            ).json()["rooms"]
+            self.assertNotIn(room_code, [room["room_code"] for room in available_rooms])
+            overlapping_booking = client.post(
+                "/reservations",
+                json={
+                    "guest_name": "Another Guest",
+                    "room_code": room_code,
+                    "check_in": "2026-10-19",
+                    "check_out": "2026-10-21",
+                    "rate_minor": 15000,
+                },
+                headers=headers,
+            )
+            self.assertEqual(overlapping_booking.status_code, 400)
+
+            checked_in = client.post(
+                "/front-desk/checkin",
+                json={"guest_name": guest_name, "room_code": room_code},
+                headers=headers,
+            )
+            self.assertEqual(checked_in.status_code, 200)
+            self.assertEqual(
+                client.get("/reservations", headers=headers).json()["reservations"][0]["status"],
+                "checked_in",
+            )
+            listed = client.get("/front-desk/visitors", headers=headers).json()["visitors"]
+            stay = next(record for record in listed if record["guest_name"] == guest_name)
+            self.assertEqual(stay["status"], "open")
+            self.assertIsNotNone(stay["checked_in_at"])
+
+            room_sale = client.post(
+                "/outlets/sales",
+                json={
+                    "outlet": "room_service",
+                    "total_minor": 21800,
+                    "cost_minor": 0,
+                    "room_code": room_code,
+                },
+                headers=headers,
+            )
+            self.assertEqual(room_sale.status_code, 200)
+            self.assertEqual(room_sale.json()["sale"]["guest_name"], guest_name)
+            stay = next(
+                record
+                for record in client.get("/front-desk/visitors", headers=headers).json()["visitors"]
+                if record["guest_name"] == guest_name
+            )
+            self.assertEqual(stay["closing_balance_minor"], 21800)
+            self.assertEqual(len(stay["charges"]), 1)
+            self.assertEqual(stay["charges"][0]["outlet"], "room_service")
+            self.assertEqual(ledger.entries[-1].lines[1].account_code, "4030")
+
+            walk_in_entry_start = len(ledger.entries)
+            walk_in_sale = client.post(
+                "/outlets/sales",
+                json={
+                    "outlet": "restaurant",
+                    "total_minor": 11800,
+                    "cost_minor": 3000,
+                    "payment_method": "mobile_money",
+                },
+                headers=headers,
+            )
+            self.assertEqual(walk_in_sale.status_code, 200)
+            self.assertIsNone(walk_in_sale.json()["sale"]["room_code"])
+            self.assertEqual(ledger.entries[walk_in_entry_start].lines[0].account_code, "1020")
+            self.assertEqual(ledger.entries[walk_in_entry_start].lines[1].account_code, "4010")
+            self.assertTrue(all(entry.is_balanced() for entry in ledger.entries[walk_in_entry_start:]))
+
+            underpaid_checkout = client.post(
+                "/front-desk/checkout",
+                json={"guest_name": guest_name, "room_code": room_code},
+                headers=headers,
+            )
+            self.assertEqual(underpaid_checkout.status_code, 400)
+            self.assertEqual(
+                underpaid_checkout.json()["detail"],
+                "Checkout requires 6800 UGX payment after applying the deposit",
+            )
+
+            checked_out = client.post(
+                "/front-desk/checkout",
+                json={
+                    "guest_name": guest_name,
+                    "room_code": room_code,
+                    "cash_paid_minor": 6800,
+                    "payment_method": "card",
+                },
+                headers=headers,
+            )
+            self.assertEqual(checked_out.status_code, 200)
+            self.assertEqual(checked_out.json()["deposit_release_minor"], 15000)
+            self.assertEqual(checked_out.json()["cash_paid_minor"], 6800)
+            self.assertEqual(ledger.entries[-1].lines[0].account_code, "1010")
+            listed = client.get("/front-desk/visitors", headers=headers).json()["visitors"]
+            stay = next(record for record in listed if record["guest_name"] == guest_name)
+            self.assertEqual(stay["status"], "closed")
+            self.assertIsNotNone(stay["checked_out_at"])
 
     def test_procure_to_pay_cycle(self):
         ledger = build_default_ledger()

@@ -2,12 +2,20 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   checkInGuest,
   checkOutGuest,
+  cancelReservation,
   createReservation,
   clearSession,
   AuthSession,
+  FrontDeskStay,
+  getAvailableRooms,
   getManagementResource,
+  getFrontDeskVisitors,
+  getReservations,
+  getRooms,
+  HotelRoom,
   loginStaff,
   postManagementAction,
+  Reservation,
   restoreSession,
   StaffRole,
   StaffUser,
@@ -80,29 +88,56 @@ type Visitor = {
   company: string;
   room: string;
   time: string;
-  status: "Inside" | "Waiting" | "Checked out";
-  live?: boolean;
+  status: "Inside" | "Checked out";
+  balanceMinor: number;
+  depositMinor: number;
+  charges: FrontDeskStay["charges"];
 };
 
 const UGANDA_LOCALE = "en-UG";
 const UGANDA_TIME_ZONE = "Africa/Kampala";
 const UGANDA_CURRENCY = "UGX";
 
-const previewVisitors: Visitor[] = [
-  { name: "Sarah Nakato", initials: "SN", company: "Airtel Uganda", room: "504", time: "10:42 AM", status: "Inside" },
-  { name: "James Kato", initials: "JK", company: "MTN Uganda", room: "302", time: "10:18 AM", status: "Inside" },
-  { name: "Amina Hassan", initials: "AH", company: "Centenary Bank", room: "218", time: "11:05 AM", status: "Waiting" },
-  { name: "David Ochieng", initials: "DO", company: "Stanbic Uganda", room: "117", time: "9:36 AM", status: "Inside" },
-];
+function visitorFromStay(stay: FrontDeskStay): Visitor {
+  const checkedInAt = new Date(stay.checked_in_at);
+  const initials = stay.guest_name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
+  return {
+    name: stay.guest_name,
+    initials,
+    company: "Hotel guest",
+    room: stay.room_code,
+    time: Number.isNaN(checkedInAt.getTime())
+      ? "—"
+      : new Intl.DateTimeFormat(UGANDA_LOCALE, {
+        hour: "2-digit",
+        minute: "2-digit",
+        timeZone: UGANDA_TIME_ZONE,
+      }).format(checkedInAt),
+    status: stay.status === "open" ? "Inside" : "Checked out",
+    balanceMinor: stay.closing_balance_minor,
+    depositMinor: stay.deposit_balance_minor,
+    charges: stay.charges,
+  };
+}
 
-const appointments = [
-  { time: "09:00", name: "James Kato", detail: "Room 302 · Returning guest", type: "guest" },
-  { time: "10:30", name: "Amina Hassan", detail: "Room 218 · Early arrival", type: "arrival" },
-  { time: "12:00", name: "Kampala Design Studio", detail: "Conference room · 4 guests", type: "meeting" },
-  { time: "14:15", name: "Peter Wanjiku", detail: "Room 410 · Airport transfer", type: "guest" },
-];
+function hotelDateToday(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    timeZone: UGANDA_TIME_ZONE,
+  }).formatToParts(new Date());
+  const part = (type: string) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
 
-type ModalKind = "checkin" | "reservation" | null;
+function addHotelDays(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+type ModalKind = "checkin" | "reservation" | "checkout" | null;
 type PageKind =
   | "Overview"
   | "Visitors"
@@ -114,7 +149,8 @@ type PageKind =
   | "Finance"
   | "Reports"
   | "Approvals"
-  | "Resources";
+  | "Resources"
+  | "Outlet";
 
 const managementPages: PageKind[] = [
   "Management",
@@ -128,11 +164,12 @@ const managementPages: PageKind[] = [
 
 function pagesForRole(role: StaffRole): PageKind[] {
   if (role === "manager" || role === "admin") {
-    return ["Management", "Operations", "People", "Finance", "Reports", "Approvals", "Resources", "Overview", "Visitors", "Appointments", "History"];
+    return ["Management", "Operations", "People", "Finance", "Reports", "Approvals", "Resources", "Overview", "Visitors", "Appointments", "History", "Outlet"];
   }
   if (role === "front_desk") return ["Overview", "Visitors", "Appointments", "History"];
   if (role === "accountant") return ["Finance", "Reports", "Resources"];
-  if (role === "procurement" || role === "storekeeper" || role === "outlet_cashier") return ["Resources"];
+  if (role === "outlet_cashier") return ["Outlet"];
+  if (role === "procurement" || role === "storekeeper") return ["Resources"];
   return [];
 }
 
@@ -140,6 +177,7 @@ function defaultPageForRole(role: StaffRole): PageKind {
   if (role === "manager" || role === "admin") return "Management";
   if (role === "front_desk") return "Overview";
   if (role === "accountant") return "Finance";
+  if (role === "outlet_cashier") return "Outlet";
   return "Resources";
 }
 
@@ -154,13 +192,15 @@ function navigationForRole(role: StaffRole): Array<[PageKind, IconName]> {
       ["Approvals", "bell"],
       ["Resources", "settings"],
       ["Overview", "key"],
+      ["Outlet", "building"],
     ];
   }
   if (role === "front_desk") {
     return [["Overview", "home"], ["Visitors", "users"], ["Appointments", "calendar"], ["History", "clock"]];
   }
   if (role === "accountant") return [["Finance", "sparkle"], ["Reports", "calendar"], ["Resources", "settings"]];
-  if (role === "procurement" || role === "storekeeper" || role === "outlet_cashier") return [["Resources", "settings"]];
+  if (role === "outlet_cashier") return [["Outlet", "building"]];
+  if (role === "procurement" || role === "storekeeper") return [["Resources", "settings"]];
   return [];
 }
 
@@ -172,8 +212,18 @@ function App() {
   const [authReady, setAuthReady] = useState(() => !restoreSession());
   const [page, setPage] = useState<PageKind>(() => session ? defaultPageForRole(session.user.role) : "Overview");
   const [query, setQuery] = useState("");
-  const [visitors, setVisitors] = useState(previewVisitors);
+  const [visitors, setVisitors] = useState<Visitor[]>([]);
+  const [reservations, setReservations] = useState<Reservation[]>([]);
+  const [rooms, setRooms] = useState<HotelRoom[]>([]);
+  const [frontDeskLoading, setFrontDeskLoading] = useState(false);
   const [modal, setModal] = useState<ModalKind>(null);
+  const [checkoutVisitor, setCheckoutVisitor] = useState<Visitor | null>(null);
+  const [availableRooms, setAvailableRooms] = useState<HotelRoom[]>([]);
+  const [availabilityLoading, setAvailabilityLoading] = useState(false);
+  const [reservationCheckIn, setReservationCheckIn] = useState(hotelDateToday);
+  const [reservationCheckOut, setReservationCheckOut] = useState(() => addHotelDays(hotelDateToday(), 1));
+  const [selectedReservationRoom, setSelectedReservationRoom] = useState("");
+  const [reservationRate, setReservationRate] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -234,15 +284,127 @@ function App() {
   const allowedPages = role ? pagesForRole(role) : [];
   const navigation = role ? navigationForRole(role) : [];
   const isManagement = managementPages.includes(page) && allowedPages.includes(page);
+  const isOutlet = page === "Outlet";
+  const isFrontDeskWorkspace = ["Overview", "Visitors", "Appointments", "History"].includes(page);
   useEffect(() => {
     if (role && !allowedPages.includes(page)) setPage(defaultPageForRole(role));
   }, [role, page]);
+
+  useEffect(() => {
+    if (!role || !["front_desk", "manager", "admin"].includes(role)) {
+      setVisitors([]);
+      setReservations([]);
+      setRooms([]);
+      setFrontDeskLoading(false);
+      return;
+    }
+    let active = true;
+    setFrontDeskLoading(true);
+    Promise.all([getFrontDeskVisitors(), getReservations(), getRooms()])
+      .then(([stays, nextReservations, nextRooms]) => {
+        if (!active) return;
+        setVisitors(stays.map(visitorFromStay));
+        setReservations(nextReservations);
+        setRooms(nextRooms);
+      })
+      .catch((loadError: unknown) => {
+        if (active) {
+          setError(loadError instanceof Error ? loadError.message : "Could not load front desk data.");
+        }
+      })
+      .finally(() => {
+        if (active) setFrontDeskLoading(false);
+      });
+    return () => { active = false; };
+  }, [role, session?.access_token]);
+
+  useEffect(() => {
+    if (modal !== "reservation" || reservationCheckOut <= reservationCheckIn) {
+      setAvailableRooms([]);
+      setAvailabilityLoading(false);
+      return;
+    }
+    let active = true;
+    setAvailabilityLoading(true);
+    getAvailableRooms(reservationCheckIn, reservationCheckOut)
+      .then((nextRooms) => {
+        if (!active) return;
+        setAvailableRooms(nextRooms);
+        if (!nextRooms.some((room) => room.room_code === selectedReservationRoom)) {
+          setSelectedReservationRoom(nextRooms[0]?.room_code ?? "");
+          setReservationRate(nextRooms[0] ? String(nextRooms[0].rate_minor) : "");
+        }
+      })
+      .catch((loadError: unknown) => {
+        if (active) setError(loadError instanceof Error ? loadError.message : "Room availability could not be loaded.");
+      })
+      .finally(() => {
+        if (active) setAvailabilityLoading(false);
+      });
+    return () => { active = false; };
+  }, [modal, reservationCheckIn, reservationCheckOut, selectedReservationRoom]);
+
+  async function refreshFrontDeskData() {
+    const [stays, nextReservations, nextRooms] = await Promise.all([
+      getFrontDeskVisitors(),
+      getReservations(),
+      getRooms(),
+    ]);
+    setVisitors(stays.map(visitorFromStay));
+    setReservations(nextReservations);
+    setRooms(nextRooms);
+  }
+
+  function openReservationForm() {
+    setReservationCheckIn(hotelDateToday());
+    setReservationCheckOut(addHotelDays(hotelDateToday(), 1));
+    setSelectedReservationRoom("");
+    setReservationRate("");
+    setModal("reservation");
+  }
+
+  function openCheckInForm() {
+    setReservationCheckOut(addHotelDays(hotelDateToday(), 1));
+    setModal("checkin");
+  }
+
+  async function cancelBooking(reservation: Reservation) {
+    setError("");
+    setNotice("");
+    try {
+      await cancelReservation(reservation.reservation_id);
+      await refreshFrontDeskData();
+      setNotice(`Reservation for ${reservation.guest_name} cancelled.`);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The reservation could not be cancelled.");
+    }
+  }
+
+  async function registerRoom(payload: { room_code: string; room_type: string; rate_minor: number }) {
+    setError("");
+    setNotice("");
+    try {
+      await postManagementAction("/rooms", payload);
+      await refreshFrontDeskData();
+      setNotice(`Room ${payload.room_code} added to the room inventory.`);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The room could not be registered.");
+    }
+  }
 
   const filteredVisitors = useMemo(
     () => visitors.filter((visitor) =>
       `${visitor.name} ${visitor.company} ${visitor.room}`.toLowerCase().includes(query.toLowerCase()),
     ),
     [visitors, query],
+  );
+  const activeVisitors = useMemo(
+    () => filteredVisitors.filter((visitor) => visitor.status === "Inside"),
+    [filteredVisitors],
+  );
+  const todaysReservations = useMemo(
+    () => reservations.filter((reservation) => reservation.check_in === hotelDateToday()),
+    [reservations],
   );
   const today = new Intl.DateTimeFormat(UGANDA_LOCALE, {
     weekday: "long",
@@ -273,32 +435,30 @@ function App() {
     setNotice("");
     try {
       if (modal === "checkin") {
-        await checkInGuest(guestName, roomCode);
-        setVisitors((current) => [
-          {
-            name: guestName,
-            initials: guestName.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase(),
-            company: "Hotel guest",
-            room: roomCode,
-            time: new Intl.DateTimeFormat(UGANDA_LOCALE, { hour: "2-digit", minute: "2-digit", timeZone: UGANDA_TIME_ZONE }).format(new Date()),
-            status: "Inside",
-            live: true,
-          },
-          ...current,
-        ]);
+        await checkInGuest(guestName, roomCode, String(form.get("check_out")));
+        await refreshFrontDeskData();
         setNotice(`${guestName} checked in successfully.`);
       } else if (modal === "reservation") {
-        const rate = Number(form.get("rate"));
+        const rate = Number(form.get("rate_minor"));
         await createReservation({
           guest_name: guestName,
           room_code: roomCode,
-          check_in: String(form.get("check_in")),
-          check_out: String(form.get("check_out")),
+          check_in: reservationCheckIn,
+          check_out: reservationCheckOut,
           rate_minor: Math.round(rate),
         });
+        await refreshFrontDeskData();
         setNotice(`Reservation created for ${guestName}.`);
+      } else if (modal === "checkout") {
+        if (!checkoutVisitor) throw new Error("Select an active guest stay before checkout.");
+        const cashPaid = Number(form.get("cash_paid_minor"));
+        const paymentMethod = String(form.get("payment_method")) as "cash" | "mobile_money" | "card";
+        await checkOutGuest(guestName, roomCode, cashPaid, paymentMethod);
+        await refreshFrontDeskData();
+        setNotice(`${guestName} checked out. Folio payment recorded.`);
       }
       setModal(null);
+      setCheckoutVisitor(null);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "The request could not be completed.");
     } finally {
@@ -309,15 +469,8 @@ function App() {
   async function checkout(visitor: Visitor) {
     setError("");
     setNotice("");
-    try {
-      await checkOutGuest(visitor.name, visitor.room);
-      setVisitors((current) => current.map((item) =>
-        item === visitor ? { ...item, status: "Checked out" } : item,
-      ));
-      setNotice(`${visitor.name} checked out.`);
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Checkout could not be completed.");
-    }
+    setCheckoutVisitor(visitor);
+    setModal("checkout");
   }
 
   function changePage(nextPage: PageKind) {
@@ -363,7 +516,7 @@ function App() {
 
       <main className="main-content">
         <header className="topbar">
-          <div className="breadcrumb"><span>Hoteru</span><Icon name="chevron" size={15} /><strong>{isManagement ? `Management / ${page}` : `Front Desk / ${page}`}</strong></div>
+          <div className="breadcrumb"><span>Hoteru</span><Icon name="chevron" size={15} /><strong>{isManagement ? `Management / ${page}` : isOutlet ? `Outlet / ${page}` : `Front Desk / ${page}`}</strong></div>
           <div className="topbar-actions">
             <label className="search-box">
               <Icon name="search" size={18} />
@@ -394,21 +547,22 @@ function App() {
         <div className="page-content">
           <section className="page-heading">
             <div>
-              <div className="eyebrow"><span className="live-dot" /> {isManagement ? "GENERAL MANAGEMENT" : "FRONT DESK"} <span className="eyebrow-divider">/</span> {today.toUpperCase()}</div>
-              <h1>{page === "Overview" ? "Good morning, Alex" : page === "Management" ? "The whole operation, at a glance" : page}</h1>
+              <div className="eyebrow"><span className="live-dot" /> {isManagement ? "GENERAL MANAGEMENT" : isOutlet ? "RESTAURANT & ROOM SERVICE" : "FRONT DESK"} <span className="eyebrow-divider">/</span> {today.toUpperCase()}</div>
+              <h1>{page === "Overview" ? "Good morning, Alex" : page === "Management" ? "The whole operation, at a glance" : isOutlet ? "Restaurant sales" : page}</h1>
               <p className="heading-subtitle">
                 {isManagement ? "Live operational and financial signals to guide today’s decisions." :
+                  isOutlet ? "Serve walk-in diners and post in-house guest orders to their folios." :
                   page === "Overview" ? "Here’s what’s happening at The Meridian Kampala today." :
                   page === "Visitors" ? "A clear view of today’s arrivals and in-house guests." :
                     page === "Appointments" ? "Today’s arrivals, meetings, and scheduled visits." :
                       "Recent front desk activity at a glance."}
               </p>
             </div>
-            {!isManagement && <div className="heading-actions">
-              <button className="button button-secondary" onClick={() => setModal("reservation")}>
+            {isFrontDeskWorkspace && !isManagement && <div className="heading-actions">
+              <button className="button button-secondary" onClick={openReservationForm}>
                 <Icon name="calendar" size={18} /> <span>New reservation</span>
               </button>
-              <button className="button button-primary" onClick={() => setModal("checkin")}>
+              <button className="button button-primary" onClick={openCheckInForm}>
                 <Icon name="plus" size={19} /> <span>Check in</span>
               </button>
             </div>}
@@ -417,49 +571,144 @@ function App() {
           {notice && <div className="toast toast-success" role="status"><Icon name="check" size={17} />{notice}<button onClick={() => setNotice("")} aria-label="Dismiss message"><Icon name="close" size={16} /></button></div>}
           {error && <div className="toast toast-error" role="alert"><span>{error}</span><button onClick={() => setError("")} aria-label="Dismiss error"><Icon name="close" size={16} /></button></div>}
 
-          {allowedPages.length === 0 ? <section className="panel management-panel"><EmptyMessage text="Your role does not have a workspace enabled yet. Ask an administrator to assign an available staff role." /></section> : isManagement ? <ManagementWorkspace page={page} userRole={session.user.role} currentUserEmail={session.user.email} onNotice={setNotice} onError={setError} /> : page === "Overview" && <Overview
-            visitors={filteredVisitors}
-            onCheckIn={() => setModal("checkin")}
+          {allowedPages.length === 0 ? <section className="panel management-panel"><EmptyMessage text="Your role does not have a workspace enabled yet. Ask an administrator to assign an available staff role." /></section> : isManagement ? <ManagementWorkspace page={page} userRole={session.user.role} currentUserEmail={session.user.email} onNotice={setNotice} onError={setError} /> : isOutlet ? <OutletWorkspace onNotice={setNotice} onError={setError} /> : page === "Overview" && <Overview
+            visitors={visitors}
+            activeVisitors={activeVisitors}
+            reservations={reservations}
+            todaysReservations={todaysReservations}
+            loading={frontDeskLoading}
+            onCheckIn={openCheckInForm}
             onCheckout={checkout}
             onViewVisitors={() => changePage("Visitors")}
             onViewAppointments={() => changePage("Appointments")}
           />}
-          {page === "Visitors" && <VisitorPage visitors={filteredVisitors} onCheckout={checkout} />}
-          {page === "Appointments" && <AppointmentsPage onReserve={() => setModal("reservation")} />}
+          {page === "Visitors" && <VisitorPage visitors={activeVisitors} loading={frontDeskLoading} onCheckout={checkout} />}
+          {page === "Appointments" && <AppointmentsPage
+            reservations={reservations}
+            rooms={rooms}
+            loading={frontDeskLoading}
+            canManageRooms={role === "manager" || role === "admin"}
+            onReserve={openReservationForm}
+            onCancel={cancelBooking}
+            onCreateRoom={registerRoom}
+          />}
           {page === "History" && <HistoryPage visitors={visitors} />}
         </div>
-        <footer className="footer"><span><span className="live-dot" /> API connected</span><span>Hoteru {isManagement ? "Management" : "Front Desk"} <i>·</i> Live module data</span></footer>
+        <footer className="footer"><span><span className="live-dot" /> API connected</span><span>Hoteru {isManagement ? "Management" : isOutlet ? "Outlet" : "Front Desk"} <i>·</i> Live module data</span></footer>
       </main>
 
       {modal && (
         <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setModal(null)}>
           <section className="modal" aria-modal="true" role="dialog" aria-labelledby="modal-title">
             <div className="modal-header">
-              <div className="modal-icon"><Icon name={modal === "checkin" ? "key" : "calendar"} /></div>
-              <button className="icon-button" onClick={() => setModal(null)} aria-label="Close"><Icon name="close" size={19} /></button>
+              <div className="modal-icon"><Icon name={modal === "checkin" ? "key" : modal === "checkout" ? "check" : "calendar"} /></div>
+              <button className="icon-button" onClick={() => { setModal(null); setCheckoutVisitor(null); }} aria-label="Close"><Icon name="close" size={19} /></button>
             </div>
-            <h2 id="modal-title">{modal === "checkin" ? "Check in a guest" : "New reservation"}</h2>
-            <p className="modal-subtitle">A couple of details and you’re all set.</p>
+            <h2 id="modal-title">{modal === "checkin" ? "Check in a guest" : modal === "checkout" ? "Check out guest" : "New reservation"}</h2>
+            <p className="modal-subtitle">{modal === "checkout" ? "Review the folio balance and record payment." : "A couple of details and you’re all set."}</p>
             <form onSubmit={submitReceptionForm}>
-              <label className="field-label" htmlFor="guest_name">Guest name</label>
-              <input autoFocus className="form-input" id="guest_name" name="guest_name" placeholder="e.g. Jane Nakato" required />
-              <label className="field-label" htmlFor="room_code">Room number</label>
-              <input className="form-input" id="room_code" name="room_code" placeholder="e.g. 204" required />
+              {modal === "checkout" && checkoutVisitor ? (
+                <>
+                  <input type="hidden" name="guest_name" value={checkoutVisitor.name} />
+                  <input type="hidden" name="room_code" value={checkoutVisitor.room} />
+                  <div className="checkout-summary">
+                    <strong>{checkoutVisitor.name} · Room {checkoutVisitor.room}</strong>
+                    {checkoutVisitor.charges.map((charge, index) => (
+                      <span key={`${charge.created_at}-${index}`}>
+                        {charge.outlet.replace("_", " ")}: {amountLabel(charge.total_minor)}
+                      </span>
+                    ))}
+                    <span>Folio balance: {amountLabel(checkoutVisitor.balanceMinor)}</span>
+                    <span>Deposit available: {amountLabel(checkoutVisitor.depositMinor)}</span>
+                    <strong>Payment due: {amountLabel(Math.max(0, checkoutVisitor.balanceMinor - checkoutVisitor.depositMinor))}</strong>
+                    {checkoutVisitor.depositMinor > checkoutVisitor.balanceMinor && <span>Unused deposit to refund: {amountLabel(checkoutVisitor.depositMinor - checkoutVisitor.balanceMinor)}</span>}
+                  </div>
+                  <label className="field-label" htmlFor="cash_paid_minor">Amount to collect <span className="field-hint">UGX</span></label>
+                  <input
+                    autoFocus
+                    className="form-input"
+                    id="cash_paid_minor"
+                    name="cash_paid_minor"
+                    type="number"
+                    min="0"
+                    step="1"
+                    defaultValue={Math.max(0, checkoutVisitor.balanceMinor - checkoutVisitor.depositMinor)}
+                    required
+                  />
+                  <label className="field-label" htmlFor="checkout_payment_method">Payment method</label>
+                  <select className="form-input" id="checkout_payment_method" name="payment_method" defaultValue="cash">
+                    <option value="cash">Cash</option>
+                    <option value="mobile_money">Mobile money</option>
+                    <option value="card">Card</option>
+                  </select>
+                </>
+              ) : (
+                <>
+                  <label className="field-label" htmlFor="guest_name">Guest name</label>
+                  <input autoFocus className="form-input" id="guest_name" name="guest_name" placeholder="e.g. Jane Nakato" required />
+                  <label className="field-label" htmlFor="room_code">{modal === "reservation" ? "Available room" : "Room number"}</label>
+                  {modal === "reservation" ? (
+                    <select
+                      className="form-input"
+                      id="room_code"
+                      name="room_code"
+                      value={selectedReservationRoom}
+                      onChange={(event) => {
+                        const room = availableRooms.find((item) => item.room_code === event.target.value);
+                        setSelectedReservationRoom(event.target.value);
+                        if (room) setReservationRate(String(room.rate_minor));
+                      }}
+                      required
+                      disabled={availabilityLoading || availableRooms.length === 0}
+                    >
+                      <option value="">{availabilityLoading ? "Checking availability…" : "Select available room"}</option>
+                      {availableRooms.map((room) => (
+                        <option value={room.room_code} key={room.room_code}>
+                          {room.room_code} · {room.room_type} · {amountLabel(room.rate_minor)} / night
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <select className="form-input" id="room_code" name="room_code" required defaultValue="">
+                      <option value="">Select available room</option>
+                      {rooms.filter((room) => room.status === "available").map((room) => (
+                        <option value={room.room_code} key={room.room_code}>{room.room_code} · {room.room_type}</option>
+                      ))}
+                    </select>
+                  )}
+                  {modal === "checkin" && (
+                    <>
+                      <label className="field-label" htmlFor="check_out">Expected check-out</label>
+                      <input
+                        className="form-input"
+                        id="check_out"
+                        name="check_out"
+                        type="date"
+                        min={addHotelDays(hotelDateToday(), 1)}
+                        value={reservationCheckOut}
+                        onChange={(event) => setReservationCheckOut(event.target.value)}
+                        required
+                      />
+                    </>
+                  )}
+                </>
+              )}
               {modal === "reservation" && (
                 <>
                   <div className="form-row">
-                    <div><label className="field-label" htmlFor="check_in">Check in</label><input className="form-input" id="check_in" name="check_in" type="date" required /></div>
-                    <div><label className="field-label" htmlFor="check_out">Check out</label><input className="form-input" id="check_out" name="check_out" type="date" required /></div>
+                    <div><label className="field-label" htmlFor="check_in">Check in</label><input className="form-input" id="check_in" name="check_in" type="date" min={hotelDateToday()} value={reservationCheckIn} onChange={(event) => setReservationCheckIn(event.target.value)} required /></div>
+                    <div><label className="field-label" htmlFor="check_out">Check out</label><input className="form-input" id="check_out" name="check_out" type="date" min={addHotelDays(reservationCheckIn, 1)} value={reservationCheckOut} onChange={(event) => setReservationCheckOut(event.target.value)} required /></div>
                   </div>
                   <label className="field-label" htmlFor="rate">Nightly rate <span className="field-hint">UGX</span></label>
-                  <input className="form-input" id="rate" name="rate" type="number" min="1" step="1" placeholder="15,000" required />
+                  <input className="form-input" id="rate" name="rate_minor" type="number" min="1" step="1" value={reservationRate} onChange={(event) => setReservationRate(event.target.value)} required />
+                  {!availabilityLoading && availableRooms.length === 0 && <p className="live-data-note">No rooms are available for those dates. Choose a different date range or ask a manager to add rooms.</p>}
                 </>
               )}
               <div className="modal-actions">
-                <button type="button" className="button button-secondary" onClick={() => setModal(null)}>Cancel</button>
+                <button type="button" className="button button-secondary" onClick={() => { setModal(null); setCheckoutVisitor(null); }}>Cancel</button>
                 <button type="submit" className="button button-primary" disabled={busy}>
-                  <Icon name={modal === "checkin" ? "key" : "check"} size={18} />
-                  {busy ? "Saving..." : modal === "checkin" ? "Confirm check-in" : "Create reservation"}
+                  <Icon name={modal === "checkin" ? "key" : modal === "checkout" ? "check" : "calendar"} size={18} />
+                  {busy ? "Saving..." : modal === "checkin" ? "Confirm check-in" : modal === "checkout" ? "Complete checkout" : "Create reservation"}
                 </button>
               </div>
             </form>
@@ -544,6 +793,166 @@ function amountLabel(value: unknown, currency = UGANDA_CURRENCY) {
     currency,
     maximumFractionDigits: 0,
   }).format(amount);
+}
+
+function OutletWorkspace({
+  onNotice,
+  onError,
+}: {
+  onNotice: (message: string) => void;
+  onError: (message: string) => void;
+}) {
+  const [folios, setFolios] = useState<ManagementRecord[]>([]);
+  const [sales, setSales] = useState<ManagementRecord[]>([]);
+  const [outlet, setOutlet] = useState<"restaurant" | "room_service">("restaurant");
+  const [chargeToRoom, setChargeToRoom] = useState(false);
+  const [roomCode, setRoomCode] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const isRoomCharge = outlet === "room_service" || chargeToRoom;
+
+  async function refreshSales() {
+    const [folioResponse, salesResponse] = await Promise.all([
+      getManagementResource("/outlets/active-folios"),
+      getManagementResource("/outlets/sales"),
+    ]);
+    setFolios(rowsOf(folioResponse, "folios"));
+    setSales(rowsOf(salesResponse, "sales"));
+  }
+
+  useEffect(() => {
+    let active = true;
+    refreshSales()
+      .catch((loadError: unknown) => {
+        if (active) onError(loadError instanceof Error ? loadError.message : "Outlet data could not be loaded.");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
+
+  async function submitSale(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const total = Number(form.get("total_minor"));
+    const cost = Number(form.get("cost_minor"));
+    const paymentMethod = String(form.get("payment_method"));
+    if (!Number.isInteger(total) || total <= 0 || !Number.isInteger(cost) || cost < 0) {
+      onError("Enter a valid sale total and cost in whole UGX.");
+      return;
+    }
+    if (isRoomCharge && !roomCode) {
+      onError("Select an occupied guest room to charge this order.");
+      return;
+    }
+    if (!isRoomCharge && !["cash", "mobile_money", "card"].includes(paymentMethod)) {
+      onError("Select a valid payment method.");
+      return;
+    }
+
+    setSaving(true);
+    onError("");
+    try {
+      await postManagementAction("/outlets/sales", {
+        outlet,
+        total_minor: total,
+        cost_minor: cost,
+        ...(isRoomCharge ? { room_code: roomCode } : { payment_method: paymentMethod }),
+      });
+      await refreshSales();
+      onNotice(isRoomCharge ? "Guest order posted to the room folio." : "Walk-in sale recorded and payment taken.");
+      formElement.reset();
+      setChargeToRoom(false);
+      setRoomCode("");
+    } catch (requestError) {
+      onError(requestError instanceof Error ? requestError.message : "The outlet sale could not be recorded.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) return <div className="management-loading"><span className="loading-indicator" />Loading outlet data…</div>;
+
+  return (
+    <div className="management-grid">
+      <section className="panel management-panel">
+        <div className="panel-heading"><div><h2>Record a sale</h2><p>Restaurant walk-ins pay at the outlet; in-house orders can go to a room folio.</p></div></div>
+        <form className="action-form" onSubmit={submitSale}>
+          <label className="action-field">
+            <span>Service</span>
+            <select
+              className="form-input"
+              name="outlet"
+              value={outlet}
+              onChange={(event) => {
+                const nextOutlet = event.target.value === "room_service" ? "room_service" : "restaurant";
+                setOutlet(nextOutlet);
+                setChargeToRoom(nextOutlet === "room_service");
+                setRoomCode("");
+              }}
+            >
+              <option value="restaurant">Restaurant</option>
+              <option value="room_service">Room service</option>
+            </select>
+          </label>
+          {outlet === "restaurant" && (
+            <label className="action-field outlet-check-row">
+              <span>Charge to an in-house guest room?</span>
+              <input type="checkbox" checked={chargeToRoom} onChange={(event) => setChargeToRoom(event.target.checked)} />
+            </label>
+          )}
+          {isRoomCharge ? (
+            <label className="action-field">
+              <span>Guest and room</span>
+              <select className="form-input" value={roomCode} onChange={(event) => setRoomCode(event.target.value)} required>
+                <option value="">Select an occupied room</option>
+                {folios.map((folio) => (
+                  <option key={String(folio.room_code)} value={String(folio.room_code)}>
+                    {String(folio.guest_name)} · Room {String(folio.room_code)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <label className="action-field">
+              <span>Payment method</span>
+              <select className="form-input" name="payment_method" defaultValue="cash">
+                <option value="cash">Cash</option>
+                <option value="mobile_money">Mobile money</option>
+                <option value="card">Card</option>
+              </select>
+            </label>
+          )}
+          <label className="action-field"><span>Sale total (UGX)</span><input className="form-input" name="total_minor" type="number" min="1" step="1" required /></label>
+          <label className="action-field"><span>Cost of sale (UGX)</span><input className="form-input" name="cost_minor" type="number" min="0" step="1" defaultValue="0" required /></label>
+          <button className="button button-primary" type="submit" disabled={saving || (isRoomCharge && folios.length === 0)}>
+            <Icon name="check" size={18} />{saving ? "Recording sale…" : isRoomCharge ? "Post to guest folio" : "Record walk-in payment"}
+          </button>
+          {isRoomCharge && folios.length === 0 && <p className="live-data-note">There are no occupied rooms to charge yet.</p>}
+        </form>
+      </section>
+      <section className="panel management-panel">
+        <div className="panel-heading"><div><h2>Recent outlet sales</h2><p>Recorded walk-in payments and room charges</p></div><span className="count-pill">{sales.length}</span></div>
+        <div className="management-record-list">
+          {sales.length ? sales.slice(0, 12).map((sale, index) => {
+            const isRoom = typeof sale.room_code === "string" && sale.room_code.length > 0;
+            return (
+              <div className="management-record" key={`${String(sale.created_at)}-${index}`}>
+                <span className="record-icon"><Icon name={isRoom ? "building" : "check"} size={17} /></span>
+                <div>
+                  <strong>{String(sale.outlet).replace("_", " ")} · {amountLabel(sale.total_minor)}</strong>
+                  <small>{isRoom ? `${String(sale.guest_name)} · Room ${String(sale.room_code)} · Folio` : `Walk-in · ${String(sale.payment_method ?? "cash")}`}</small>
+                </div>
+                <span className={`status-badge ${isRoom ? "inside" : "checked-out"}`}><span />{isRoom ? "Room charge" : "Paid"}</span>
+              </div>
+            );
+          }) : <EmptyMessage text="Sales will appear here after they are recorded." />}
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function endpointForManagementPage(page: PageKind, role: StaffRole): string[] {
@@ -697,18 +1106,6 @@ const resourceActions: ManagementAction[] = [
     success: "Stock depletion recorded.",
   },
   {
-    title: "Record outlet sale",
-    description: "Post a sale to a guest folio or as direct payment.",
-    path: "/outlets/sales",
-    fields: [
-      { name: "outlet", label: "Outlet" },
-      { name: "total_minor", label: "Sale total (UGX)", type: "number", min: 1 },
-      { name: "cost_minor", label: "Cost (UGX)", type: "number", min: 0 },
-      { name: "room_code", label: "Room (optional)", optional: true },
-    ],
-    success: "Outlet sale posted.",
-  },
-  {
     title: "Run payroll",
     description: "Post a payroll run to the general ledger.",
     path: "/hr/payroll",
@@ -778,7 +1175,6 @@ function actionsForRole(role: StaffRole): ManagementAction[] {
     ],
     procurement: ["Create purchase order", "Receive goods", "Match supplier invoice"],
     storekeeper: ["Receive goods", "Add stock item", "Receive stock", "Deplete stock"],
-    outlet_cashier: ["Record outlet sale"],
   };
   const titles = allowedTitles[role] ?? [];
   return resourceActions.filter((action) => titles.includes(action.title));
@@ -1268,20 +1664,26 @@ function EmptyMessage({ text }: { text: string }) {
 
 function Overview({
   visitors,
+  activeVisitors,
+  reservations,
+  todaysReservations,
+  loading,
   onCheckIn,
   onCheckout,
   onViewVisitors,
   onViewAppointments,
 }: {
   visitors: Visitor[];
+  activeVisitors: Visitor[];
+  reservations: Reservation[];
+  todaysReservations: Reservation[];
+  loading: boolean;
   onCheckIn: () => void;
   onCheckout: (visitor: Visitor) => void;
   onViewVisitors: () => void;
   onViewAppointments: () => void;
 }) {
-  const inside = visitors.filter((visitor) => visitor.status === "Inside").length;
-  const waiting = visitors.filter((visitor) => visitor.status === "Waiting").length;
-  const checkedInDuringSession = visitors.filter((visitor) => visitor.live && visitor.status === "Inside").length;
+  const checkedOut = visitors.filter((visitor) => visitor.status === "Checked out").length;
   const today = new Intl.DateTimeFormat(UGANDA_LOCALE, {
     weekday: "long",
     month: "long",
@@ -1289,10 +1691,10 @@ function Overview({
     timeZone: UGANDA_TIME_ZONE,
   }).format(new Date());
   const stats = [
-    { label: "Today’s arrivals", value: "18", delta: "6 expected soon", icon: "users" as const, tone: "teal" },
-    { label: "Appointments", value: "12", delta: "Next at 10:30 AM", icon: "calendar" as const, tone: "blue" },
-    { label: "In-house guests", value: String(32 + checkedInDuringSession), delta: `${inside} checked in today`, icon: "building" as const, tone: "navy" },
-    { label: "Needs attention", value: String(4 + waiting), delta: "2 requests · 2 early", icon: "clock" as const, tone: "amber" },
+    { label: "Today’s arrivals", value: String(todaysReservations.length), delta: "Scheduled check-ins", icon: "users" as const, tone: "teal" },
+    { label: "Reservations", value: String(reservations.length), delta: "All recorded stays", icon: "calendar" as const, tone: "blue" },
+    { label: "In-house guests", value: String(activeVisitors.length), delta: "Currently checked in", icon: "building" as const, tone: "navy" },
+    { label: "Checked out", value: String(checkedOut), delta: "Recorded stays", icon: "clock" as const, tone: "amber" },
   ];
   return (
     <>
@@ -1308,35 +1710,40 @@ function Overview({
       <div className="dashboard-grid">
         <section className="panel visitor-panel">
           <div className="panel-heading">
-            <div><div className="panel-title-row"><h2>At the hotel</h2><span className="count-pill">{visitors.length}</span></div><p>Guest arrivals and in-house</p></div>
+            <div><div className="panel-title-row"><h2>At the hotel</h2><span className="count-pill">{activeVisitors.length}</span></div><p>Currently checked-in guests</p></div>
             <button className="text-button" onClick={onViewVisitors}>View all <Icon name="arrow" size={15} /></button>
           </div>
           <div className="visitor-list">
-            {visitors.slice(0, 4).map((visitor) => <VisitorRow key={`${visitor.name}-${visitor.room}`} visitor={visitor} onCheckout={onCheckout} />)}
+            {loading
+              ? <EmptyMessage text="Loading guest stays…" />
+              : activeVisitors.length
+                ? activeVisitors.slice(0, 4).map((visitor) => <VisitorRow key={`${visitor.name}-${visitor.room}`} visitor={visitor} onCheckout={onCheckout} />)
+                : <EmptyMessage text="Checked-in guests will appear here." />}
           </div>
           <button className="panel-bottom-action" onClick={onCheckIn}><Icon name="plus" size={17} /> Check in a guest</button>
         </section>
         <section className="panel appointment-panel">
           <div className="panel-heading">
-            <div><div className="panel-title-row"><h2>Today’s schedule</h2><span className="count-pill">4</span></div><p>{today}</p></div>
+            <div><div className="panel-title-row"><h2>Today’s arrivals</h2><span className="count-pill">{todaysReservations.length}</span></div><p>{today}</p></div>
             <button className="text-button" onClick={onViewAppointments}>Calendar <Icon name="arrow" size={15} /></button>
           </div>
           <div className="schedule-list">
-            {appointments.slice(0, 4).map((appointment) => (
-              <div className="schedule-row" key={`${appointment.time}-${appointment.name}`}>
-                <span className="schedule-time">{appointment.time}</span>
-                <span className={`schedule-marker ${appointment.type}`} />
-                <div className="schedule-details"><strong>{appointment.name}</strong><span>{appointment.detail}</span></div>
+            {todaysReservations.slice(0, 4).map((reservation) => (
+              <div className="schedule-row" key={`${reservation.guest_name}-${reservation.room_code}`}>
+                <span className="schedule-time">Arrival</span>
+                <span className="schedule-marker arrival" />
+                <div className="schedule-details"><strong>{reservation.guest_name}</strong><span>Room {reservation.room_code} · {reservation.status}</span></div>
                 <Icon name="chevron" size={16} />
               </div>
             ))}
+            {!loading && todaysReservations.length === 0 && <EmptyMessage text="No reservations are scheduled to arrive today." />}
           </div>
-          <div className="schedule-note"><Icon name="sparkle" size={16} /><span>Next arrival in <strong>15 minutes</strong></span></div>
+          <div className="schedule-note"><Icon name="sparkle" size={16} /><span>Showing recorded reservations for today.</span></div>
         </section>
       </div>
       <section className="welcome-strip">
         <div className="welcome-icon"><Icon name="sparkle" size={21} /></div>
-        <div><strong>A little heads-up</strong><p>3 guests requested early check-in today. Rooms 218, 306, and 410.</p></div>
+        <div><strong>Front desk overview</strong><p>Guest activity and reservations are loaded from the hotel API.</p></div>
         <button className="text-button" onClick={onViewAppointments}>See arrivals <Icon name="arrow" size={15} /></button>
       </section>
     </>
@@ -1347,15 +1754,19 @@ function VisitorRow({ visitor, onCheckout }: { visitor: Visitor; onCheckout?: (v
   return (
     <article className="visitor-row">
       <div className={`avatar guest-avatar avatar-${visitor.initials.charCodeAt(0) % 4}`}>{visitor.initials}</div>
-      <div className="guest-details"><strong>{visitor.name}</strong><span>{visitor.company} <i>·</i> Room {visitor.room}</span></div>
+      <div className="guest-details">
+        <strong>{visitor.name}</strong>
+        <span>{visitor.company} <i>·</i> Room {visitor.room}</span>
+        {visitor.status === "Inside" && visitor.balanceMinor > 0 && <span>Folio balance · {amountLabel(visitor.balanceMinor)}</span>}
+      </div>
       <div className="guest-arrival"><Icon name="clock" size={14} /><span>{visitor.time}</span></div>
       <span className={`status-badge ${visitor.status.toLowerCase().replace(" ", "-")}`}><span />{visitor.status}</span>
-      {visitor.live && visitor.status === "Inside" && onCheckout && <button className="checkout-button" onClick={() => onCheckout(visitor)}>Check out</button>}
+      {visitor.status === "Inside" && onCheckout && <button className="checkout-button" onClick={() => onCheckout(visitor)}>Check out</button>}
     </article>
   );
 }
 
-function VisitorPage({ visitors, onCheckout }: { visitors: Visitor[]; onCheckout: (visitor: Visitor) => void }) {
+function VisitorPage({ visitors, loading, onCheckout }: { visitors: Visitor[]; loading: boolean; onCheckout: (visitor: Visitor) => void }) {
   return (
     <section className="panel full-panel">
       <div className="panel-heading">
@@ -1363,38 +1774,98 @@ function VisitorPage({ visitors, onCheckout }: { visitors: Visitor[]; onCheckout
         <button className="button button-small button-secondary"><Icon name="filter" size={17} /> Filter</button>
       </div>
       <div className="visitor-list visitor-list-large">
-        {visitors.map((visitor) => <VisitorRow key={`${visitor.name}-${visitor.room}`} visitor={visitor} onCheckout={onCheckout} />)}
+        {loading
+          ? <EmptyMessage text="Loading guest stays…" />
+          : visitors.length
+            ? visitors.map((visitor) => <VisitorRow key={`${visitor.name}-${visitor.room}`} visitor={visitor} onCheckout={onCheckout} />)
+            : <EmptyMessage text="There are no guests currently checked in." />}
       </div>
-      <p className="preview-note">Sample visitor records are preview data. Only check-ins made in this session can be checked out.</p>
     </section>
   );
 }
 
-function AppointmentsPage({ onReserve }: { onReserve: () => void }) {
-  const today = new Intl.DateTimeFormat(UGANDA_LOCALE, {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-    timeZone: UGANDA_TIME_ZONE,
-  }).format(new Date());
+function AppointmentsPage({
+  reservations,
+  rooms,
+  loading,
+  canManageRooms,
+  onReserve,
+  onCancel,
+  onCreateRoom,
+}: {
+  reservations: Reservation[];
+  rooms: HotelRoom[];
+  loading: boolean;
+  canManageRooms: boolean;
+  onReserve: () => void;
+  onCancel: (reservation: Reservation) => void;
+  onCreateRoom: (room: { room_code: string; room_type: string; rate_minor: number }) => void;
+}) {
   return (
-    <section className="panel full-panel calendar-panel">
-      <div className="panel-heading">
-        <div><div className="panel-title-row"><h2>{today}</h2><span className="today-pill">Today</span></div><p>4 scheduled arrivals and visits</p></div>
-        <button className="button button-small button-secondary" onClick={onReserve}><Icon name="plus" size={17} /> Add reservation</button>
-      </div>
-      <div className="appointment-list">
-        {appointments.map((appointment) => (
-          <article className="appointment-card" key={`${appointment.time}-${appointment.name}`}>
-            <time>{appointment.time}</time>
-            <span className={`schedule-marker ${appointment.type}`} />
-            <div className="appointment-info"><strong>{appointment.name}</strong><span>{appointment.detail}</span></div>
-            <span className="appointment-tag">{appointment.type === "arrival" ? "Early arrival" : appointment.type === "meeting" ? "Meeting" : "Guest arrival"}</span>
-            <button className="quiet-icon" aria-label={`More about ${appointment.name}`}><Icon name="more" size={19} /></button>
-          </article>
-        ))}
-      </div>
-      <p className="preview-note">Appointment schedule shown is preview data.</p>
+    <>
+      <section className="panel full-panel calendar-panel">
+        <div className="panel-heading">
+          <div><div className="panel-title-row"><h2>Reservations</h2><span className="count-pill">{reservations.length}</span></div><p>Room assignments, stay dates, and booking status.</p></div>
+          <button className="button button-small button-secondary" onClick={onReserve}><Icon name="plus" size={17} /> Add reservation</button>
+        </div>
+        <div className="appointment-list">
+          {loading
+            ? <EmptyMessage text="Loading reservations…" />
+            : reservations.length
+              ? reservations.map((reservation) => (
+                <article className="appointment-card" key={reservation.reservation_id}>
+                  <time>{reservation.check_in}</time>
+                  <span className="schedule-marker arrival" />
+                  <div className="appointment-info"><strong>{reservation.guest_name}</strong><span>Room {reservation.room_code} · Check-out {reservation.check_out} · {amountLabel(reservation.rate_minor)} / night</span></div>
+                  <span className="appointment-tag">{reservation.status.replace("_", " ")}</span>
+                  {reservation.status === "confirmed"
+                    ? <button className="checkout-button" onClick={() => onCancel(reservation)}>Cancel</button>
+                    : <span className="quiet-icon" aria-hidden="true"><Icon name="check" size={18} /></span>}
+                </article>
+              ))
+              : <EmptyMessage text="Create a reservation to see upcoming guest arrivals here." />}
+        </div>
+      </section>
+      <section className="panel full-panel">
+        <div className="panel-heading">
+          <div><div className="panel-title-row"><h2>Room inventory</h2><span className="count-pill">{rooms.length}</span></div><p>Availability is checked against active stays and reservations.</p></div>
+        </div>
+        <div className="management-record-list">
+          {rooms.length ? rooms.map((room) => (
+            <div className="management-record" key={room.room_code}>
+              <span className="record-icon"><Icon name="building" size={17} /></span>
+              <div><strong>Room {room.room_code}</strong><small>{room.room_type} · {amountLabel(room.rate_minor)} per night</small></div>
+              <span className={`status-badge ${room.status === "occupied" ? "waiting" : "inside"}`}><span />{room.status}</span>
+            </div>
+          )) : <EmptyMessage text="No rooms registered yet. A manager can add rooms below." />}
+        </div>
+      </section>
+      {canManageRooms && <RoomRegistrationForm onCreateRoom={onCreateRoom} />}
+    </>
+  );
+}
+
+function RoomRegistrationForm({ onCreateRoom }: { onCreateRoom: (room: { room_code: string; room_type: string; rate_minor: number }) => void }) {
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    onCreateRoom({
+      room_code: String(form.get("room_code")).trim(),
+      room_type: String(form.get("room_type")).trim(),
+      rate_minor: Number(form.get("rate_minor")),
+    });
+    event.currentTarget.reset();
+  }
+
+  return (
+    <section className="panel management-panel">
+      <div className="panel-heading"><div><h2>Register a room</h2><p>Add rooms to availability. Room registration is restricted to managers and admins.</p></div></div>
+      <form className="action-form room-registration-form" onSubmit={submit}>
+        <label className="action-field"><span>Room number</span><input className="form-input" name="room_code" required /></label>
+        <label className="action-field"><span>Room type</span><input className="form-input" name="room_type" placeholder="Standard, deluxe…" required /></label>
+        <label className="action-field"><span>Nightly rate (UGX)</span><input className="form-input" name="rate_minor" type="number" min="1" step="1" required /></label>
+        <button className="button button-primary" type="submit"><Icon name="plus" size={17} />Add room</button>
+      </form>
     </section>
   );
 }
@@ -1404,7 +1875,7 @@ function HistoryPage({ visitors }: { visitors: Visitor[] }) {
   return (
     <section className="panel full-panel">
       <div className="panel-heading">
-        <div><div className="panel-title-row"><h2>Recent activity</h2><span className="count-pill">{checkedOut.length}</span></div><p>Check-ins and check-outs recorded during this session.</p></div>
+        <div><div className="panel-title-row"><h2>Recent activity</h2><span className="count-pill">{checkedOut.length}</span></div><p>Guest stays recorded by the hotel API.</p></div>
       </div>
       {checkedOut.length ? (
         <div className="visitor-list visitor-list-large">

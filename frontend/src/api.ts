@@ -29,16 +29,69 @@ export interface ReservationInput {
   rate_minor: number;
 }
 
-export async function checkInGuest(guest_name: string, room_code: string) {
-  return request("/front-desk/checkin", { guest_name, room_code });
+export interface HotelRoom {
+  room_code: string;
+  room_type: string;
+  rate_minor: number;
+  status: "available" | "occupied";
 }
 
-export async function checkOutGuest(guest_name: string, room_code: string) {
-  return request("/front-desk/checkout", { guest_name, room_code });
+export interface FrontDeskStay {
+  guest_name: string;
+  room_code: string;
+  status: "open" | "closed";
+  checked_in_at: string;
+  checked_out_at: string | null;
+  closing_balance_minor: number;
+  deposit_balance_minor: number;
+  charges: Array<{
+    outlet: string;
+    total_minor: number;
+    created_at: string;
+  }>;
+}
+
+export interface Reservation extends ReservationInput {
+  reservation_id: string;
+  status: string;
+}
+
+export async function checkInGuest(guest_name: string, room_code: string, check_out: string) {
+  return request("/front-desk/checkin", { guest_name, room_code, check_out });
+}
+
+export async function checkOutGuest(
+  guest_name: string,
+  room_code: string,
+  cash_paid_minor: number,
+  payment_method: "cash" | "mobile_money" | "card",
+) {
+  return request("/front-desk/checkout", { guest_name, room_code, cash_paid_minor, payment_method });
 }
 
 export async function createReservation(reservation: ReservationInput) {
   return request("/reservations", reservation);
+}
+
+export async function getFrontDeskVisitors(): Promise<FrontDeskStay[]> {
+  return arrayFromResponse(await getManagementResource("/front-desk/visitors"), "visitors");
+}
+
+export async function getReservations(): Promise<Reservation[]> {
+  return arrayFromResponse(await getManagementResource("/reservations"), "reservations");
+}
+
+export async function getRooms(): Promise<HotelRoom[]> {
+  return arrayFromResponse(await getManagementResource("/rooms"), "rooms");
+}
+
+export async function getAvailableRooms(check_in: string, check_out: string): Promise<HotelRoom[]> {
+  const query = new URLSearchParams({ check_in, check_out });
+  return arrayFromResponse(await getManagementResource(`/rooms/availability?${query}`), "rooms");
+}
+
+export async function cancelReservation(reservation_id: string): Promise<void> {
+  await request(`/reservations/${encodeURIComponent(reservation_id)}/cancel`, {});
 }
 
 export async function loginStaff(email: string, password: string): Promise<AuthSession> {
@@ -131,6 +184,17 @@ export async function getManagementResource(path: string): Promise<unknown> {
 
 export async function postManagementAction(path: string, body: object): Promise<unknown> {
   return request(path, body);
+}
+
+function arrayFromResponse<T>(value: unknown, key: string): T[] {
+  if (!value || typeof value !== "object") {
+    throw new Error("The server returned an invalid list response.");
+  }
+  const rows = (value as Record<string, unknown>)[key];
+  if (!Array.isArray(rows)) {
+    throw new Error("The server returned an invalid list response.");
+  }
+  return rows as T[];
 }
 
 async function responseError(response: Response): Promise<Error> {

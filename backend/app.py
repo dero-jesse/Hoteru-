@@ -48,13 +48,20 @@ async def handle_missing_record(_request: Request, error: KeyError) -> JSONRespo
 if os.getenv("APP_ENV", "development") == "development" and not db.query("staff_users", email="admin@hotel.local"):
     create_staff_user("admin@hotel.local", "ChangeMe!123", "Hotel Administrator", "admin")
 ledger = build_default_ledger()
-reservation_service = ReservationService()
 frontdesk = FrontDeskService(ledger)
+if settings.app_env == "development":
+    for room_code, room_type, rate_minor in (
+        ("DEMO-101", "Standard", 150_000),
+        ("DEMO-102", "Standard", 150_000),
+        ("DEMO-201", "Deluxe", 220_000),
+    ):
+        frontdesk.create_room(room_code, room_type, rate_minor)
+reservation_service = ReservationService(frontdesk)
 procurement = ProcurementService(ledger)
 inventory = InventoryService(ledger)
 payroll = PayrollService(ledger)
 assets = AssetService(ledger)
-outlets = OutletService(ledger)
+outlets = OutletService(ledger, frontdesk)
 night_audit = NightAuditService(ledger)
 
 
@@ -73,22 +80,35 @@ class CreateStaffRequest(BaseModel):
 class ReservationRequest(BaseModel):
     guest_name: str
     room_code: str
-    check_in: str
-    check_out: str
-    rate_minor: int
+    check_in: date
+    check_out: date
+    rate_minor: int = Field(gt=0)
+
+
+class RoomRequest(BaseModel):
+    room_code: str
+    room_type: str
+    rate_minor: int = Field(gt=0)
 
 
 class CheckInRequest(BaseModel):
     guest_name: str
     room_code: str
+    check_out: date | None = None
 
 
 class OutletSaleRequest(BaseModel):
-    outlet: str
-    total_minor: int
-    cost_minor: int
+    outlet: str = Field(min_length=1)
+    total_minor: int = Field(gt=0)
+    cost_minor: int = Field(ge=0)
     room_code: str | None = None
     paid_directly: bool = False
+    payment_method: str = Field(default="cash", pattern="^(cash|mobile_money|card)$")
+
+
+class CheckoutRequest(CheckInRequest):
+    cash_paid_minor: int = Field(default=0, ge=0)
+    payment_method: str = Field(default="cash", pattern="^(cash|mobile_money|card)$")
 
 
 class PostingRequest(BaseModel):
@@ -145,14 +165,6 @@ class AssetRequest(BaseModel):
 
 class DepreciationRequest(BaseModel):
     amount_minor: int = Field(gt=0)
-
-
-class OutletSaleRequest(BaseModel):
-    outlet: str
-    total_minor: int = Field(gt=0)
-    cost_minor: int = Field(ge=0)
-    room_code: str | None = None
-    paid_directly: bool = False
 
 
 class NightAuditChargeRequest(BaseModel):
@@ -240,16 +252,73 @@ def create_reservation(payload: ReservationRequest) -> Dict[str, Any]:
     return {"status": "created", "reservation": res.__dict__}
 
 
+@app.get("/rooms", dependencies=[Depends(require_roles(*FRONT_DESK_ROLES))])
+def list_rooms() -> Dict[str, Any]:
+    return {"rooms": [room.__dict__ for room in frontdesk.rooms.values()]}
+
+
+@app.get("/rooms/availability", dependencies=[Depends(require_roles(*FRONT_DESK_ROLES))])
+def room_availability(check_in: date, check_out: date) -> Dict[str, Any]:
+    return {
+        "rooms": [room.__dict__ for room in reservation_service.available_rooms(check_in, check_out)]
+    }
+
+
+@app.post("/rooms", dependencies=[Depends(require_roles(*MANAGER_ROLES))])
+def create_room(payload: RoomRequest) -> Dict[str, Any]:
+    room = frontdesk.create_room(payload.room_code, payload.room_type, payload.rate_minor)
+    return {"room": room.__dict__}
+
+
+@app.get("/reservations", dependencies=[Depends(require_roles(*FRONT_DESK_ROLES))])
+def list_reservations() -> Dict[str, Any]:
+    return {"reservations": list(reversed(db.query("reservations")))}
+
+
+@app.post("/reservations/{reservation_id}/cancel", dependencies=[Depends(require_roles(*FRONT_DESK_ROLES))])
+def cancel_reservation(reservation_id: str) -> Dict[str, Any]:
+    return reservation_service.cancel_reservation(reservation_id)
+
+
+@app.get("/front-desk/visitors", dependencies=[Depends(require_roles(*FRONT_DESK_ROLES))])
+def list_front_desk_visitors() -> Dict[str, Any]:
+    visitors = []
+    for folio in reversed(db.query("folios")):
+        checked_in_at = folio["checked_in_at"]
+        charges = [
+            sale
+            for sale in db.query(
+                "outlet_sales",
+                guest_name=folio["guest_name"],
+                room_code=folio["room_code"],
+            )
+            if sale["created_at"] >= checked_in_at
+        ]
+        visitors.append({**folio, "charges": charges})
+    return {"visitors": visitors}
+
+
 @app.post("/front-desk/checkin", dependencies=[Depends(require_roles(*FRONT_DESK_ROLES))])
 def check_in(payload: CheckInRequest) -> Dict[str, Any]:
-    room = frontdesk.create_room(payload.room_code, "deluxe", 15000)
-    folio = frontdesk.check_in(payload.guest_name, payload.room_code)
+    room = frontdesk.rooms.get(payload.room_code)
+    if room is None:
+        raise HTTPException(status_code=404, detail=f"Room {payload.room_code} is not registered")
+    folio = frontdesk.check_in(payload.guest_name, payload.room_code, payload.check_out)
     return {"status": "checked_in", "room": room.__dict__, "folio": folio.__dict__}
 
 
-@app.post("/front-desk/checkout", dependencies=[Depends(require_roles(*FRONT_DESK_ROLES))])
-def checkout(payload: CheckInRequest) -> Dict[str, Any]:
-    settlement = frontdesk.checkout(payload.guest_name, payload.room_code, cash_paid_minor=10000, deposit_release_minor=5000)
+@app.post("/front-desk/checkout")
+def checkout(
+    payload: CheckoutRequest,
+    user: StaffUser = Depends(require_roles(*FRONT_DESK_ROLES)),
+) -> Dict[str, Any]:
+    settlement = frontdesk.checkout(
+        payload.guest_name,
+        payload.room_code,
+        cash_paid_minor=payload.cash_paid_minor,
+        payment_method=payload.payment_method,
+        created_by=user.email,
+    )
     return settlement
 
 
@@ -490,16 +559,36 @@ def run_payroll(payload: PayrollRequest) -> Dict[str, Any]:
     return {"payroll_run": run.__dict__}
 
 
-@app.post("/outlets/sales", dependencies=[Depends(require_roles("outlet_cashier", *FRONT_DESK_ROLES))])
-def record_outlet_sale(payload: OutletSaleRequest) -> Dict[str, Any]:
+@app.post("/outlets/sales")
+def record_outlet_sale(
+    payload: OutletSaleRequest,
+    user: StaffUser = Depends(require_roles("outlet_cashier", *FRONT_DESK_ROLES)),
+) -> Dict[str, Any]:
+    outlet_name = payload.outlet.strip().lower()
+    if not outlet_name:
+        raise HTTPException(status_code=422, detail="Outlet name is required")
+    if outlet_name == "room_service" and not payload.room_code:
+        raise HTTPException(status_code=422, detail="Room service orders must be charged to an occupied room")
     sale = outlets.record_sale(
-        payload.outlet,
+        outlet_name,
         payload.total_minor,
         payload.cost_minor,
         payload.room_code,
         payload.paid_directly,
+        payload.payment_method,
+        user.email,
     )
     return {"sale": sale.__dict__}
+
+
+@app.get("/outlets/active-folios", dependencies=[Depends(require_roles("outlet_cashier", *FRONT_DESK_ROLES))])
+def list_outlet_active_folios() -> Dict[str, Any]:
+    return {"folios": frontdesk.open_folios()}
+
+
+@app.get("/outlets/sales", dependencies=[Depends(require_roles("outlet_cashier", *FINANCE_ROLES))])
+def list_outlet_sales() -> Dict[str, Any]:
+    return {"sales": list(reversed(db.query("outlet_sales")))}
 
 
 @app.post("/front-desk/night-audit/charges", dependencies=[Depends(require_roles(*NIGHT_AUDIT_ROLES))])
